@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yarasa Haritalandırma Radarı</title>
+    <style>
+        body { background: #050505; color: #00ff00; font-family: monospace; text-align: center; margin: 0; padding: 20px; }
+        #canvas-container { position: relative; width: 350px; height: 350px; margin: 20px auto; border: 2px solid #00ff00; border-radius: 50%; background: radial-gradient(circle, #011001 0%, #000 80%); overflow: hidden; }
+        canvas { position: absolute; top: 0; left: 0; }
+        #info { font-size: 16px; margin: 15px; min-height: 40px; }
+        button { background: #00ff00; color: #000; border: none; padding: 12px 25px; font-size: 16px; font-family: monospace; font-weight: bold; cursor: pointer; border-radius: 4px; box-shadow: 0 0 10px #00ff00; }
+    </style>
+</head>
+<body>
+
+    <h1>SONAR MAPPING v2.0</h1>
+    <div id="canvas-container">
+        <canvas id="radarCanvas" width="350" height="350"></canvas>
+    </div>
+    <button onclick="initSonar()">SİSTEMİ BAŞLAT</button>
+    <div id="info">Açı: 0° | Mesafe: -- cm<br>Telefonu yavaşça sağa sola çevirerek tarayın.</div>
+
+    <script>
+        let audioCtx, analyser;
+        const FREQUENCY = 19000;
+        const SOUND_SPEED = 343;
+        
+        const canvas = document.getElementById('radarCanvas');
+        const ctx = canvas.getContext('2d');
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const maxRadarRangeCm = 200; // Maksimum 2 metre tarama menzili
+
+        let currentHeading = 0; // Jiroskoptan alınacak anlık telefon açısı
+        let mapPoints = []; // Haritadaki noktaları tutacak dizi
+
+        // Sensörleri ve sesi başlat
+        async function initSonar() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Mikrofon izni
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const source = audioCtx.createMediaStreamSource(stream);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 2048;
+            source.connect(analyser);
+
+            // Yön sensörünü aktif et (Telefonun pusulası)
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', (event) => {
+                    // alpha telefonun kendi etrafındaki dönme açısıdır (0-360 derece)
+                    if(event.alpha !== null) {
+                        currentHeading = event.alpha;
+                    }
+                }, true);
+            }
+
+            // Radar ekranını çizmeye başla (Saniyede 60 kare)
+            requestAnimationFrame(drawRadar);
+
+            // Her 200 milisaniyede bir "bip" fırlat
+            setInterval(() => { sendPing(); }, 200);
+        }
+
+        function sendPing() {
+            if (!audioCtx) return;
+            let osc = audioCtx.createOscillator();
+            let gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(FREQUENCY, audioCtx.currentTime);
+            gain.gain.setValueAtTime(1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.01);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            let startTime = audioCtx.currentTime;
+            osc.start(startTime);
+            osc.stop(startTime + 0.01);
+
+            setTimeout(() => { listenForEcho(startTime); }, 15);
+        }
+
+        function listenForEcho(startTime) {
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            let nyquist = audioCtx.sampleRate / 2;
+            let index = Math.round((FREQUENCY / nyquist) * bufferLength);
+            let volume = dataArray[index];
+
+            if (volume > 30) { // Hassasiyet eşiği
+                let duration = audioCtx.currentTime - startTime;
+                let distanceCm = ((SOUND_SPEED * duration) / 2) * 100;
+
+                if (distanceCm > 10 && distanceCm < maxRadarRangeCm) {
+                    document.getElementById('info').innerHTML = `Açı: ${Math.round(currentHeading)}° | Mesafe: ${distanceCm.toFixed(0)} cm<br>Tarama yapılıyor...`;
+                    
+                    // Ölçülen açıyı ve mesafeyi harita noktasına dönüştür (Radyan cinsinden)
+                    let angleRad = (currentHeading * Math.PI) / 180;
+                    
+                    // Noktayı kaydet
+                    mapPoints.push({
+                        angle: angleRad,
+                        distance: distanceCm,
+                        timestamp: Date.now()
+                    });
+                }
+            }
+        }
+
+        // Radar ekranını ve harita noktalarını çizen fonksiyon
+        function drawRadar() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Radar halkalarını çiz
+            ctx.strokeStyle = "rgba(0, 255, 0, 0.2)";
+            ctx.lineWidth = 1;
+            for(let r = 50; r <= centerX; r += 50) {
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, r, 0, 2 * Math.PI);
+                ctx.stroke();
+            }
+
+            // Anlık tarama çizgisini çiz (Telefonun baktığı yöne doğru parlayan çizgi)
+            let scanRad = (currentHeading * Math.PI) / 180;
+            let scanX = centerX + (centerX * Math.sin(scanRad));
+            let scanY = centerY - (centerY * Math.cos(scanRad));
+            ctx.strokeStyle = "rgba(0, 255, 0, 0.5)";
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY);
+            ctx.lineTo(scanX, scanY);
+            ctx.stroke();
+
+            // Hafızadaki tüm harita noktalarını ekrana bas
+            ctx.fillStyle = "#00ff00";
+            // Son 15 saniyede toplanan noktaları göster (Eski noktalar silinsin ki harita güncellensin)
+            mapPoints = mapPoints.filter(p => Date.now() - p.timestamp < 15000); 
+
+            mapPoints.forEach(p => {
+                // Mesafeyi ekrandaki piksel oranına çeviriyoruz
+                let pixelDist = (p.distance / maxRadarRangeCm) * centerX;
+                
+                // Noktanın ekrandaki X ve Y koordinatları
+                let x = centerX + (pixelDist * Math.sin(p.angle));
+                let y = centerY - (pixelDist * Math.cos(p.angle));
+
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, 2 * Math.PI); // 3 piksel büyüklüğünde yeşil nokta
+                ctx.fill();
+            });
+
+            requestAnimationFrame(drawRadar);
+        }
+    </script>
+</body>
+</html>
